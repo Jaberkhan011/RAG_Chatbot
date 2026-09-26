@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local RAG / Chatbot</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="logo">R</div>
+            <div>
+                <h1>RAG Chat</h1>
+                <span>Local document assistant</span>
+            </div>
+        </div>
+
+        <section class="panel">
+            <label class="label">Mode</label>
+            <div class="segmented">
+                <button id="ragMode" class="active">RAG</button>
+                <button id="chatMode">Chatbot</button>
+            </div>
+            <p id="modeHelp" class="hint">
+                Answer using the uploaded/retrieved document only.
+            </p>
+        </section>
+
+        <section class="panel">
+            <label class="label">Model provider</label>
+            <div class="segmented">
+                <button id="localProvider" class="active">Local</button>
+                <button id="googleProvider">Google</button>
+            </div>
+
+            <div id="apiKeyBox" class="hidden">
+                <label class="small-label" for="apiKey">Google API key</label>
+                <input id="apiKey" type="password"
+                       placeholder="Enter key for this request">
+                <p class="hint">The key is sent only with the current request and is not stored by this UI.</p>
+            </div>
+        </section>
+
+        <section id="pdfPanel" class="panel">
+            <label class="label">RAG document</label>
+
+            <label class="upload">
+                <input id="pdfFile" type="file" accept=".pdf">
+                <span>Choose PDF</span>
+            </label>
+
+            <button id="uploadBtn" class="primary full">
+                Index PDF
+            </button>
+
+            <div id="uploadStatus" class="status">
+                Existing database will be used until a PDF is indexed.
+            </div>
+
+            <div class="db-info">
+                <div><span>Document</span><strong id="dbPdf">—</strong></div>
+                <div><span>Chunks</span><strong id="dbChunks">—</strong></div>
+            </div>
+        </section>
+
+        <section id="ragSettings" class="panel">
+            <label class="label" for="topK">Top-K chunks</label>
+            <div class="range-row">
+                <input id="topK" type="range" min="1" max="10" value="5">
+                <output id="topKValue">5</output>
+            </div>
+        </section>
+
+        <div class="sidebar-footer">
+            <span id="statusDot" class="dot"></span>
+            <span id="serverStatus">Checking server…</span>
+        </div>
+    </aside>
+
+    <main class="main">
+        <header class="topbar">
+            <div>
+                <h2 id="title">Document RAG</h2>
+                <p id="subtitle">Ask questions about your indexed PDF.</p>
+            </div>
+            <button id="clearBtn" class="secondary">Clear</button>
+        </header>
+
+        <section id="chat" class="chat"></section>
+
+        <div class="composer-wrap">
+            <form id="chatForm" class="composer">
+                <textarea id="question"
+                          rows="1"
+                          placeholder="Ask a question…"></textarea>
+                <button id="sendBtn" class="send" type="submit">Send</button>
+            </form>
+            <div class="composer-hint">
+                <span>Enter to send · Shift+Enter for newline</span>
+                <span id="timingHint"></span>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

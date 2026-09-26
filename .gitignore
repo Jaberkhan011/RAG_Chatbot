@@ -1,0 +1,17 @@
+# Environment files — never commit these
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# But DO commit the template so teammates know what variables to set
+!.env.example
+!.env.sample
+
+# Virtual environments
+.venv/
+venv/
+env/   
+__pycache__
