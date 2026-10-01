@@ -11,3 +11,5 @@ langchain-text-splitters
 langchain-google-genai
 python-dotenv
 accelerate
+langchain_experimental
+langchain_huggingface

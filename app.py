@@ -4,18 +4,39 @@ import uuid
 import shutil
 from pathlib import Path
 from threading import Lock
-
+from typing import Optional
 import chromadb
 import torch
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+
+from fastapi import (
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
+
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+
 from pydantic import BaseModel
+
 from pypdf import PdfReader
+from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+)
+
+from langchain_core.documents import Document
+
+from langchain_experimental.text_splitter import (
+    SemanticChunker,
+)
 
 # Optional Google provider. Install with:
 # pip install langchain-google-genai
@@ -64,8 +85,18 @@ DEFAULT_COLLECTION_NAME = os.getenv(
 TOP_K = int(os.getenv("TOP_K", "5"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "300"))
 
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "600"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
+# Semantic chunking
+SEMANTIC_BREAKPOINT_TYPE = os.getenv(
+    "SEMANTIC_BREAKPOINT_TYPE",
+    "percentile",
+)
+
+SEMANTIC_BREAKPOINT_THRESHOLD = float(
+    os.getenv(
+        "SEMANTIC_BREAKPOINT_THRESHOLD",
+        "95",
+    )
+)
 
 HNSW_SPACE = "cosine"
 HNSW_M = int(os.getenv("HNSW_M", "16"))
@@ -90,6 +121,7 @@ app.mount(
 )
 
 embedding_model = None
+semantic_embedding_model = None
 local_tokenizer = None
 local_model = None
 
@@ -151,12 +183,36 @@ def load_local_models():
 
 def load_embedding_only():
     global embedding_model
+    global semantic_embedding_model
 
+    # Raw SentenceTransformer
     if embedding_model is None:
-        print("Loading embedding model...")
+        print("Loading SentenceTransformer...")
+
+        start = time.perf_counter()
+
         embedding_model = SentenceTransformer(
             EMBEDDING_MODEL,
             device="cpu",
+        )
+
+        print(
+            f"SentenceTransformer loaded: "
+            f"{time.perf_counter() - start:.2f}s"
+        )
+
+    # LangChain wrapper for SemanticChunker
+    if semantic_embedding_model is None:
+        print("Loading LangChain embedding wrapper...")
+
+        semantic_embedding_model = HuggingFaceEmbeddings(
+            model_name=EMBEDDING_MODEL,
+            model_kwargs={
+                "device": "cpu",
+            },
+            encode_kwargs={
+                "normalize_embeddings": True,
+            },
         )
 
 
@@ -209,7 +265,9 @@ def build_vector_db(pdf_path: Path):
     load_embedding_only()
 
     build_id = uuid.uuid4().hex[:10]
+
     db_path = VECTOR_DB_ROOT / f"chroma_{build_id}"
+
     collection_name = f"pdf_rag_{build_id}"
 
     total_start = time.perf_counter()
@@ -221,6 +279,7 @@ def build_vector_db(pdf_path: Path):
     start = time.perf_counter()
 
     reader = PdfReader(str(pdf_path))
+
     pages = []
 
     for page_number, page in enumerate(
@@ -230,6 +289,7 @@ def build_vector_db(pdf_path: Path):
         text = page.extract_text()
 
         if text and text.strip():
+
             pages.append(
                 {
                     "text": text.strip(),
@@ -237,9 +297,11 @@ def build_vector_db(pdf_path: Path):
                 }
             )
 
+    pdf_time = time.perf_counter() - start
+
     print(
         f"[PDF] {len(pages)} pages extracted "
-        f"in {time.perf_counter() - start:.2f}s"
+        f"in {pdf_time:.2f}s"
     )
 
     if not pages:
@@ -248,22 +310,30 @@ def build_vector_db(pdf_path: Path):
         )
 
     # --------------------------------------------------------
-    # Chunking
+    # Semantic chunker
     # --------------------------------------------------------
 
     start = time.perf_counter()
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+    semantic_chunker = SemanticChunker(
+        embeddings=semantic_embedding_model,
+        breakpoint_threshold_type=SEMANTIC_BREAKPOINT_TYPE,
+        breakpoint_threshold_amount=SEMANTIC_BREAKPOINT_THRESHOLD,
     )
 
     texts = []
     metadatas = []
 
+    global_chunk_id = 0
+
+    # --------------------------------------------------------
+    # Semantic chunking
+    #
+    # Process each page separately so that a chunk always
+    # belongs to a known PDF page.
+    # --------------------------------------------------------
+
     for page in pages:
-        # Use a small wrapper document so page metadata is preserved.
-        from langchain_core.documents import Document
 
         document = Document(
             page_content=page["text"],
@@ -273,19 +343,54 @@ def build_vector_db(pdf_path: Path):
             },
         )
 
-        page_chunks = splitter.split_documents(
+        page_chunks = semantic_chunker.split_documents(
             [document]
         )
 
         for chunk in page_chunks:
-            chunk.metadata["chunk_id"] = len(texts)
-            texts.append(chunk.page_content)
-            metadatas.append(chunk.metadata)
+
+            text = chunk.page_content.strip()
+
+            if not text:
+                continue
+
+            metadata = {
+                "source": pdf_path.name,
+                "page": page["page"],
+                "chunk_id": global_chunk_id,
+                "chunking": "semantic",
+            }
+
+            texts.append(text)
+            metadatas.append(metadata)
+
+            global_chunk_id += 1
+
+    chunking_time = time.perf_counter() - start
 
     print(
-        f"[CHUNKING] {len(texts)} chunks created "
-        f"in {time.perf_counter() - start:.2f}s"
+        f"[SEMANTIC CHUNKING] "
+        f"{len(texts)} chunks created "
+        f"in {chunking_time:.2f}s"
     )
+
+    # --------------------------------------------------------
+    # Chunk statistics
+    # --------------------------------------------------------
+
+    if texts:
+
+        lengths = [
+            len(text)
+            for text in texts
+        ]
+
+        print(
+            f"[CHUNKS] "
+            f"min={min(lengths)}, "
+            f"max={max(lengths)}, "
+            f"avg={sum(lengths) / len(lengths):.1f} chars"
+        )
 
     # --------------------------------------------------------
     # Embeddings
@@ -300,9 +405,12 @@ def build_vector_db(pdf_path: Path):
         convert_to_numpy=True,
     )
 
+    embedding_time = time.perf_counter() - start
+
     print(
-        f"[EMBEDDING] {len(embeddings)} embeddings generated "
-        f"in {time.perf_counter() - start:.2f}s"
+        f"[EMBEDDING] "
+        f"{len(embeddings)} embeddings generated "
+        f"in {embedding_time:.2f}s"
     )
 
     # --------------------------------------------------------
@@ -338,9 +446,11 @@ def build_vector_db(pdf_path: Path):
         metadatas=metadatas,
     )
 
+    chroma_time = time.perf_counter() - start
+
     print(
         f"[CHROMA/HNSW] DB created in "
-        f"{time.perf_counter() - start:.2f}s"
+        f"{chroma_time:.2f}s"
     )
 
     print(
@@ -418,13 +528,30 @@ def build_context(documents, metadatas):
         zip(documents, metadatas),
         start=1,
     ):
-        page = metadata.get("page", "Unknown")
-        source = metadata.get("source", "Unknown")
+
+        if metadata is None:
+            metadata = {}
+
+        page = metadata.get(
+            "page",
+            "Unknown",
+        )
+
+        source = metadata.get(
+            "source",
+            "Unknown",
+        )
+
+        chunk_id = metadata.get(
+            "chunk_id",
+            "Unknown",
+        )
 
         parts.append(
             f"[Source {i}]\n"
             f"Document: {source}\n"
-            f"Page: {page}\n\n"
+            f"Page: {page}\n"
+            f"Chunk: {chunk_id}\n\n"
             f"{document}"
         )
 
@@ -561,7 +688,7 @@ def generate_google(
     question: str,
     system_prompt: str,
     context: str = "",
-    api_key: str | None = None,
+    api_key: Optional[str] = None,
 ):
     if not GOOGLE_AVAILABLE:
         raise RuntimeError(
@@ -625,10 +752,10 @@ def generate_google(
 
 class ChatRequest(BaseModel):
     question: str
-    mode: str = "rag"       # rag | chat
-    provider: str = "local"  # local | google
+    mode: str = "rag"
+    provider: str = "local"
     top_k: int = TOP_K
-    api_key: str | None = None
+    api_key: Optional[str] = None
 
 
 # ============================================================
@@ -818,17 +945,20 @@ def chat(request: ChatRequest):
 
     sources = []
 
-    if retrieval:
-        for i, (
-            metadata,
-            distance,
-        ) in enumerate(
-            zip(
-                retrieval["metadatas"],
-                retrieval["distances"],
-            ),
-            start=1,
-        ):
+    for i, (
+        metadata,
+        distance,
+    ) in enumerate(
+        zip(
+            retrieval["metadatas"],
+            retrieval["distances"],
+        ),
+        start=1,
+    ):
+
+        if metadata is None:
+            metadata = {}
+
             sources.append(
                 {
                     "rank": i,
