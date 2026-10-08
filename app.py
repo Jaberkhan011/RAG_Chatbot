@@ -945,41 +945,32 @@ def chat(request: ChatRequest):
 
     sources = []
 
-    for i, (
-        metadata,
-        distance,
-    ) in enumerate(
-        zip(
-            retrieval["metadatas"],
-            retrieval["distances"],
-        ),
-        start=1,
-    ):
+    for i, (metadata, distance,) in enumerate(zip(retrieval["metadatas"], retrieval["distances"],), start=1,):
 
         if metadata is None:
             metadata = {}
 
-            sources.append(
-                {
-                    "rank": i,
-                    "page": metadata.get(
-                        "page",
-                        "Unknown",
-                    ),
-                    "source": metadata.get(
-                        "source",
-                        "Unknown",
-                    ),
-                    "chunk_id": metadata.get(
-                        "chunk_id",
-                        "Unknown",
-                    ),
-                    "distance": round(
-                        float(distance),
-                        4,
-                    ),
-                }
-            )
+        sources.append(
+            {
+                "rank": i,
+                "page": metadata.get(
+                    "page",
+                    "Unknown",
+                ),
+                "source": metadata.get(
+                    "source",
+                    "Unknown",
+                ),
+                "chunk_id": metadata.get(
+                    "chunk_id",
+                    "Unknown",
+                ),
+                "distance": round(
+                    float(distance),
+                    4,
+                ),
+            }
+        )
 
     return {
         "answer": answer,

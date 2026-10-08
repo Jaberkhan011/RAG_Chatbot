@@ -1,5 +1,3 @@
-Here is a README.md for your FastAPI + local/Google RAG chatbot project:
-
 # Local RAG Chatbot
 A lightweight document question-answering application built with **FastAPI**, **ChromaDB**, **Sentence Transformers**, and **Qwen 2.5 3B Instruct**.
 The application supports both:
@@ -38,7 +36,7 @@ PDF
  ↓
 Text Extraction
  ↓
-Text Chunking
+Semantic Chunker
  ↓
 SentenceTransformer Embeddings
  ↓
@@ -67,7 +65,7 @@ Model Providers
 Two providers are supported:
 
 Provider	Description
-Local	Qwen/Qwen2.5-3B-Instruct running locally
+Local	      Qwen/Qwen2.5-3B-Instruct running locally
 Google	Google Gemini API
 
 Retrieval Configuration
@@ -245,12 +243,12 @@ The current PDF pipeline uses pypdf for text extraction.
 
 Text is then divided into chunks using:
 
-RecursiveCharacterTextSplitter
+Semantic Chunking
 
 The default upload configuration is:
 
-Chunk Size:       600
-Chunk Overlap:    100
+SEMANTIC_BREAKPOINT_TYPE : "percentile"
+SEMANTIC_BREAKPOINT_THRESHOLD:"95"
 
 These values can be changed in app.py.
 

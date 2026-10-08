@@ -11,7 +11,8 @@
 !.env.sample
 
 # Virtual environments
+.env
 .venv/
-venv/
-env/   
-__pycache__
+__pycache__/
+uploads/
+vector_dbs/
