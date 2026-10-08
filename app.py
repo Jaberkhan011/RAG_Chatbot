@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from threading import Lock
 from typing import Optional
+
 import chromadb
 import torch
 
@@ -13,7 +14,6 @@ from dotenv import load_dotenv
 from fastapi import (
     FastAPI,
     File,
-    Form,
     HTTPException,
     UploadFile,
 )
@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from pypdf import PdfReader
+
 from langchain_huggingface import HuggingFaceEmbeddings
 from sentence_transformers import SentenceTransformer
 
@@ -38,11 +39,14 @@ from langchain_experimental.text_splitter import (
     SemanticChunker,
 )
 
-# Optional Google provider. Install with:
+# Optional Google provider.
+# Install:
 # pip install langchain-google-genai
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
+
     GOOGLE_AVAILABLE = True
+
 except ImportError:
     GOOGLE_AVAILABLE = False
 
@@ -54,6 +58,7 @@ except ImportError:
 load_dotenv()
 
 APP_DIR = Path(__file__).resolve().parent
+
 UPLOAD_DIR = APP_DIR / "uploads"
 VECTOR_DB_ROOT = APP_DIR / "vector_dbs"
 STATIC_DIR = APP_DIR / "static"
@@ -71,7 +76,7 @@ EMBEDDING_MODEL = os.getenv(
     "sentence-transformers/all-MiniLM-L6-v2",
 )
 
-# Existing database from your current localrag.py.
+# Existing local Chroma database
 DEFAULT_CHROMA_DIR = os.getenv(
     "CHROMA_DIR",
     "./chroma_db_600",
@@ -82,8 +87,13 @@ DEFAULT_COLLECTION_NAME = os.getenv(
     "pdf_rag_600",
 )
 
-TOP_K = int(os.getenv("TOP_K", "5"))
-MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "300"))
+TOP_K = int(
+    os.getenv("TOP_K", "5")
+)
+
+MAX_NEW_TOKENS = int(
+    os.getenv("MAX_NEW_TOKENS", "300")
+)
 
 # Semantic chunking
 SEMANTIC_BREAKPOINT_TYPE = os.getenv(
@@ -98,8 +108,13 @@ SEMANTIC_BREAKPOINT_THRESHOLD = float(
     )
 )
 
+# HNSW
 HNSW_SPACE = "cosine"
-HNSW_M = int(os.getenv("HNSW_M", "16"))
+
+HNSW_M = int(
+    os.getenv("HNSW_M", "16")
+)
+
 HNSW_EF_CONSTRUCTION = int(
     os.getenv("HNSW_EF_CONSTRUCTION", "100")
 )
@@ -120,17 +135,24 @@ app.mount(
     name="static",
 )
 
+
+# Models
 embedding_model = None
 semantic_embedding_model = None
+
 local_tokenizer = None
 local_model = None
 
+
+# Chroma state
 active_client = None
 active_collection = None
 active_chroma_path = None
 active_collection_name = None
 active_pdf_name = None
 
+
+# Locks
 state_lock = Lock()
 model_lock = Lock()
 
@@ -140,12 +162,26 @@ model_lock = Lock()
 # ============================================================
 
 def load_local_models():
+    """
+    Load the embedding model and local Qwen model.
+
+    Embeddings run on CPU.
+    Qwen uses device_map='auto', which allows
+    PyTorch to use MPS on Apple Silicon.
+    """
+
     global embedding_model
     global local_tokenizer
     global local_model
 
+    # --------------------------------------------------------
+    # Embedding model
+    # --------------------------------------------------------
+
     if embedding_model is None:
+
         print("Loading embedding model...")
+
         start = time.perf_counter()
 
         embedding_model = SentenceTransformer(
@@ -158,35 +194,62 @@ def load_local_models():
             f"{time.perf_counter() - start:.2f}s"
         )
 
-    if local_model is None or local_tokenizer is None:
+    # --------------------------------------------------------
+    # Qwen
+    # --------------------------------------------------------
+
+    if (
+        local_model is None
+        or local_tokenizer is None
+    ):
+
         print("Loading local Qwen model...")
+
         start = time.perf_counter()
 
-        local_tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_NAME,
-            local_files_only=True,
+        local_tokenizer = (
+            AutoTokenizer.from_pretrained(
+                MODEL_NAME,
+                local_files_only=True,
+            )
         )
 
-        local_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            device_map="auto",
-            torch_dtype="auto",
-            local_files_only=True,
+        local_model = (
+            AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                device_map="auto",
+                torch_dtype="auto",
+                local_files_only=True,
+            )
         )
 
         print(
             f"Qwen loaded: "
             f"{time.perf_counter() - start:.2f}s"
         )
-        print(f"Device: {local_model.device}")
+
+        print(
+            f"Device: {local_model.device}"
+        )
 
 
 def load_embedding_only():
+    """
+    Load only the embedding components.
+
+    This is used at startup so that Qwen remains
+    lazy-loaded until a local generation request.
+    """
+
     global embedding_model
     global semantic_embedding_model
 
+    # --------------------------------------------------------
     # Raw SentenceTransformer
+    # --------------------------------------------------------
+
     if embedding_model is None:
+
         print("Loading SentenceTransformer...")
 
         start = time.perf_counter()
@@ -201,18 +264,26 @@ def load_embedding_only():
             f"{time.perf_counter() - start:.2f}s"
         )
 
+    # --------------------------------------------------------
     # LangChain wrapper for SemanticChunker
-    if semantic_embedding_model is None:
-        print("Loading LangChain embedding wrapper...")
+    # --------------------------------------------------------
 
-        semantic_embedding_model = HuggingFaceEmbeddings(
-            model_name=EMBEDDING_MODEL,
-            model_kwargs={
-                "device": "cpu",
-            },
-            encode_kwargs={
-                "normalize_embeddings": True,
-            },
+    if semantic_embedding_model is None:
+
+        print(
+            "Loading LangChain embedding wrapper..."
+        )
+
+        semantic_embedding_model = (
+            HuggingFaceEmbeddings(
+                model_name=EMBEDDING_MODEL,
+                model_kwargs={
+                    "device": "cpu",
+                },
+                encode_kwargs={
+                    "normalize_embeddings": True,
+                },
+            )
         )
 
 
@@ -221,6 +292,13 @@ def load_embedding_only():
 # ============================================================
 
 def load_existing_collection():
+    """
+    Try to load the existing local Chroma collection.
+
+    If it doesn't exist, the application simply starts
+    without an active RAG database.
+    """
+
     global active_client
     global active_collection
     global active_chroma_path
@@ -233,16 +311,27 @@ def load_existing_collection():
         path = APP_DIR / path
 
     try:
-        client = chromadb.PersistentClient(path=str(path))
+
+        client = chromadb.PersistentClient(
+            path=str(path)
+        )
+
         collection = client.get_collection(
             name=DEFAULT_COLLECTION_NAME
         )
 
         active_client = client
         active_collection = collection
+
         active_chroma_path = str(path)
-        active_collection_name = DEFAULT_COLLECTION_NAME
-        active_pdf_name = "Existing local database"
+
+        active_collection_name = (
+            DEFAULT_COLLECTION_NAME
+        )
+
+        active_pdf_name = (
+            "Existing local database"
+        )
 
         print(
             f"Loaded Chroma collection "
@@ -251,6 +340,17 @@ def load_existing_collection():
         )
 
     except Exception as exc:
+
+        # Important:
+        # Do NOT crash the application if there
+        # is no existing database.
+
+        active_client = None
+        active_collection = None
+        active_chroma_path = None
+        active_collection_name = None
+        active_pdf_name = None
+
         print(
             "No existing Chroma collection loaded: "
             f"{exc}"
@@ -262,13 +362,19 @@ def load_existing_collection():
 # ============================================================
 
 def build_vector_db(pdf_path: Path):
+
     load_embedding_only()
 
     build_id = uuid.uuid4().hex[:10]
 
-    db_path = VECTOR_DB_ROOT / f"chroma_{build_id}"
+    db_path = (
+        VECTOR_DB_ROOT
+        / f"chroma_{build_id}"
+    )
 
-    collection_name = f"pdf_rag_{build_id}"
+    collection_name = (
+        f"pdf_rag_{build_id}"
+    )
 
     total_start = time.perf_counter()
 
@@ -278,7 +384,9 @@ def build_vector_db(pdf_path: Path):
 
     start = time.perf_counter()
 
-    reader = PdfReader(str(pdf_path))
+    reader = PdfReader(
+        str(pdf_path)
+    )
 
     pages = []
 
@@ -286,6 +394,7 @@ def build_vector_db(pdf_path: Path):
         reader.pages,
         start=1,
     ):
+
         text = page.extract_text()
 
         if text and text.strip():
@@ -297,7 +406,9 @@ def build_vector_db(pdf_path: Path):
                 }
             )
 
-    pdf_time = time.perf_counter() - start
+    pdf_time = (
+        time.perf_counter() - start
+    )
 
     print(
         f"[PDF] {len(pages)} pages extracted "
@@ -305,6 +416,7 @@ def build_vector_db(pdf_path: Path):
     )
 
     if not pages:
+
         raise ValueError(
             "No extractable text was found in the PDF."
         )
@@ -317,8 +429,12 @@ def build_vector_db(pdf_path: Path):
 
     semantic_chunker = SemanticChunker(
         embeddings=semantic_embedding_model,
-        breakpoint_threshold_type=SEMANTIC_BREAKPOINT_TYPE,
-        breakpoint_threshold_amount=SEMANTIC_BREAKPOINT_THRESHOLD,
+        breakpoint_threshold_type=(
+            SEMANTIC_BREAKPOINT_TYPE
+        ),
+        breakpoint_threshold_amount=(
+            SEMANTIC_BREAKPOINT_THRESHOLD
+        ),
     )
 
     texts = []
@@ -329,8 +445,8 @@ def build_vector_db(pdf_path: Path):
     # --------------------------------------------------------
     # Semantic chunking
     #
-    # Process each page separately so that a chunk always
-    # belongs to a known PDF page.
+    # Each page is processed independently so that every
+    # chunk has a known page number.
     # --------------------------------------------------------
 
     for page in pages:
@@ -343,13 +459,17 @@ def build_vector_db(pdf_path: Path):
             },
         )
 
-        page_chunks = semantic_chunker.split_documents(
-            [document]
+        page_chunks = (
+            semantic_chunker.split_documents(
+                [document]
+            )
         )
 
         for chunk in page_chunks:
 
-            text = chunk.page_content.strip()
+            text = (
+                chunk.page_content.strip()
+            )
 
             if not text:
                 continue
@@ -366,7 +486,9 @@ def build_vector_db(pdf_path: Path):
 
             global_chunk_id += 1
 
-    chunking_time = time.perf_counter() - start
+    chunking_time = (
+        time.perf_counter() - start
+    )
 
     print(
         f"[SEMANTIC CHUNKING] "
@@ -392,6 +514,12 @@ def build_vector_db(pdf_path: Path):
             f"avg={sum(lengths) / len(lengths):.1f} chars"
         )
 
+    if not texts:
+
+        raise ValueError(
+            "No chunks were created from the PDF."
+        )
+
     # --------------------------------------------------------
     # Embeddings
     # --------------------------------------------------------
@@ -405,7 +533,9 @@ def build_vector_db(pdf_path: Path):
         convert_to_numpy=True,
     )
 
-    embedding_time = time.perf_counter() - start
+    embedding_time = (
+        time.perf_counter() - start
+    )
 
     print(
         f"[EMBEDDING] "
@@ -446,7 +576,9 @@ def build_vector_db(pdf_path: Path):
         metadatas=metadatas,
     )
 
-    chroma_time = time.perf_counter() - start
+    chroma_time = (
+        time.perf_counter() - start
+    )
 
     print(
         f"[CHROMA/HNSW] DB created in "
@@ -470,25 +602,50 @@ def build_vector_db(pdf_path: Path):
 # Retrieval
 # ============================================================
 
-def retrieve_documents(query: str, k: int = TOP_K):
+def retrieve_documents(
+    query: str,
+    k: int = TOP_K,
+):
+    """
+    Retrieve the most relevant chunks.
+
+    Always returns a dictionary when retrieval succeeds.
+    Raises a clear error if no RAG database exists.
+    """
+
     if active_collection is None:
+
         raise RuntimeError(
-            "No RAG database is loaded. Upload a PDF first."
+            "No RAG database is loaded. "
+            "Upload a PDF first."
         )
+
+    if embedding_model is None:
+        load_embedding_only()
 
     start_total = time.perf_counter()
 
+    # --------------------------------------------------------
+    # Query embedding
+    # --------------------------------------------------------
+
     start = time.perf_counter()
 
-    query_embedding = embedding_model.encode(
-        query,
-        normalize_embeddings=True,
-        convert_to_numpy=True,
-    ).tolist()
+    query_embedding = (
+        embedding_model.encode(
+            query,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+        ).tolist()
+    )
 
     embedding_ms = (
         time.perf_counter() - start
     ) * 1000
+
+    # --------------------------------------------------------
+    # HNSW search
+    # --------------------------------------------------------
 
     start = time.perf_counter()
 
@@ -501,34 +658,116 @@ def retrieve_documents(query: str, k: int = TOP_K):
         time.perf_counter() - start
     ) * 1000
 
-    documents = results["documents"][0]
-    metadatas = results["metadatas"][0]
-    distances = results.get("distances", [[]])[0]
+    # --------------------------------------------------------
+    # Safely extract results
+    # --------------------------------------------------------
+
+    documents = []
+
+    metadatas = []
+
+    distances = []
+
+    if results:
+
+        raw_documents = (
+            results.get("documents") or [[]]
+        )
+
+        raw_metadatas = (
+            results.get("metadatas") or [[]]
+        )
+
+        raw_distances = (
+            results.get("distances") or [[]]
+        )
+
+        if raw_documents:
+            documents = raw_documents[0] or []
+
+        if raw_metadatas:
+            metadatas = raw_metadatas[0] or []
+
+        if raw_distances:
+            distances = raw_distances[0] or []
+
+    # Keep arrays aligned.
+    result_count = min(
+        len(documents),
+        len(metadatas),
+    )
+
+    documents = documents[:result_count]
+    metadatas = metadatas[:result_count]
+
+    # Distance may not be returned by some configurations.
+    if len(distances) < result_count:
+
+        distances = (
+            distances
+            + [None]
+            * (
+                result_count
+                - len(distances)
+            )
+        )
+
+    distances = distances[:result_count]
 
     total_ms = (
-        time.perf_counter() - start_total
+        time.perf_counter()
+        - start_total
     ) * 1000
+
+    print(
+        f"[RETRIEVAL] "
+        f"Query embedding: {embedding_ms:.2f} ms | "
+        f"HNSW search: {hnsw_ms:.2f} ms | "
+        f"Results: {len(documents)} | "
+        f"Total: {total_ms:.2f} ms"
+    )
 
     return {
         "documents": documents,
         "metadatas": metadatas,
         "distances": distances,
         "timing": {
-            "embedding_ms": round(embedding_ms, 2),
-            "hnsw_ms": round(hnsw_ms, 2),
-            "retrieval_ms": round(total_ms, 2),
+            "embedding_ms": round(
+                embedding_ms,
+                2,
+            ),
+            "hnsw_ms": round(
+                hnsw_ms,
+                2,
+            ),
+            "retrieval_ms": round(
+                total_ms,
+                2,
+            ),
         },
     }
 
 
-def build_context(documents, metadatas):
+# ============================================================
+# Context
+# ============================================================
+
+def build_context(
+    documents,
+    metadatas,
+):
+
     parts = []
 
-    for i, (document, metadata) in enumerate(
+    for i, (
+        document,
+        metadata,
+    ) in enumerate(
         zip(documents, metadatas),
         start=1,
     ):
 
+        # Chroma can theoretically return None metadata.
         if metadata is None:
             metadata = {}
 
@@ -598,15 +837,19 @@ def generate_local(
     system_prompt: str,
     context: str = "",
 ):
+
     load_local_models()
 
     if context:
+
         user_prompt = (
             f"Context:\n\n{context}\n\n"
             f"Question:\n{question}\n\n"
             "Answer:"
         )
+
     else:
+
         user_prompt = question
 
     messages = [
@@ -621,15 +864,18 @@ def generate_local(
     ]
 
     with model_lock:
+
         start = time.perf_counter()
 
-        inputs = local_tokenizer.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(local_model.device)
+        inputs = (
+            local_tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(local_model.device)
+        )
 
         tokenization_ms = (
             time.perf_counter() - start
@@ -639,9 +885,14 @@ def generate_local(
             inputs["input_ids"].shape[-1]
         )
 
+        # ----------------------------------------------------
+        # Generation
+        # ----------------------------------------------------
+
         start = time.perf_counter()
 
         with torch.no_grad():
+
             outputs = local_model.generate(
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
@@ -657,26 +908,36 @@ def generate_local(
             input_tokens:
         ]
 
-        answer = local_tokenizer.decode(
-            generated_tokens,
-            skip_special_tokens=True,
-        ).strip()
+        answer = (
+            local_tokenizer.decode(
+                generated_tokens,
+                skip_special_tokens=True,
+            )
+            .strip()
+        )
 
-        output_tokens = len(generated_tokens)
+        output_tokens = len(
+            generated_tokens
+        )
 
     return answer, {
         "provider": "local",
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "tokenization_ms": round(
-            tokenization_ms, 2
+            tokenization_ms,
+            2,
         ),
         "generation_ms": round(
-            generation_s * 1000, 2
+            generation_s * 1000,
+            2,
         ),
         "tokens_per_second": round(
-            output_tokens / generation_s, 2
-        ) if generation_s > 0 else 0,
+            output_tokens / generation_s,
+            2,
+        )
+        if generation_s > 0
+        else 0,
     }
 
 
@@ -690,7 +951,9 @@ def generate_google(
     context: str = "",
     api_key: Optional[str] = None,
 ):
+
     if not GOOGLE_AVAILABLE:
+
         raise RuntimeError(
             "Google provider is not installed. "
             "Run: pip install langchain-google-genai"
@@ -703,18 +966,22 @@ def generate_google(
     )
 
     if not key:
+
         raise RuntimeError(
             "Google API key is required."
         )
 
     if context:
+
         prompt = (
             f"{system_prompt}\n\n"
             f"Context:\n{context}\n\n"
             f"Question:\n{question}\n\n"
             "Answer:"
         )
+
     else:
+
         prompt = (
             f"{system_prompt}\n\n"
             f"Question:\n{question}\n\n"
@@ -732,18 +999,24 @@ def generate_google(
         temperature=0.1,
     )
 
-    response = model.invoke(prompt)
+    response = model.invoke(
+        prompt
+    )
 
     generation_ms = (
         time.perf_counter() - start
     ) * 1000
 
-    return str(response.content).strip(), {
-        "provider": "google",
-        "generation_ms": round(
-            generation_ms, 2
-        ),
-    }
+    return (
+        str(response.content).strip(),
+        {
+            "provider": "google",
+            "generation_ms": round(
+                generation_ms,
+                2,
+            ),
+        },
+    )
 
 
 # ============================================================
@@ -751,10 +1024,15 @@ def generate_google(
 # ============================================================
 
 class ChatRequest(BaseModel):
+
     question: str
+
     mode: str = "rag"
+
     provider: str = "local"
+
     top_k: int = TOP_K
+
     api_key: Optional[str] = None
 
 
@@ -764,6 +1042,7 @@ class ChatRequest(BaseModel):
 
 @app.get("/")
 def index():
+
     return FileResponse(
         STATIC_DIR / "index.html"
     )
@@ -771,18 +1050,32 @@ def index():
 
 @app.get("/api/status")
 def status():
+
     return {
         "local_model": MODEL_NAME,
+
         "embedding_model": EMBEDDING_MODEL,
-        "rag_loaded": active_collection is not None,
+
+        "rag_loaded": (
+            active_collection is not None
+        ),
+
         "pdf": active_pdf_name,
-        "collection": active_collection_name,
+
+        "collection": (
+            active_collection_name
+        ),
+
         "chunks": (
             active_collection.count()
             if active_collection is not None
             else 0
         ),
-        "google_available": GOOGLE_AVAILABLE,
+
+        "google_available": (
+            GOOGLE_AVAILABLE
+        ),
+
         "device": (
             str(local_model.device)
             if local_model is not None
@@ -791,8 +1084,15 @@ def status():
     }
 
 
+# ============================================================
+# Upload
+# ============================================================
+
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...)
+):
+
     global active_client
     global active_collection
     global active_chroma_path
@@ -800,29 +1100,38 @@ async def upload_pdf(file: UploadFile = File(...)):
     global active_pdf_name
 
     if not file.filename:
+
         raise HTTPException(
             status_code=400,
             detail="No file selected.",
         )
 
-    if not file.filename.lower().endswith(".pdf"):
+    if not file.filename.lower().endswith(
+        ".pdf"
+    ):
+
         raise HTTPException(
             status_code=400,
             detail="Only PDF files are supported.",
         )
 
-    safe_name = (
-        Path(file.filename).name
+    safe_name = Path(
+        file.filename
+    ).name
+
+    upload_id = (
+        uuid.uuid4().hex[:10]
     )
 
-    upload_id = uuid.uuid4().hex[:10]
     pdf_path = (
         UPLOAD_DIR
         / f"{upload_id}_{safe_name}"
     )
 
     try:
+
         with pdf_path.open("wb") as output:
+
             shutil.copyfileobj(
                 file.file,
                 output,
@@ -833,14 +1142,29 @@ async def upload_pdf(file: UploadFile = File(...)):
             collection,
             db_path,
             collection_name,
-        ) = build_vector_db(pdf_path)
+        ) = build_vector_db(
+            pdf_path
+        )
 
         with state_lock:
+
             active_client = client
-            active_collection = collection
-            active_chroma_path = db_path
-            active_collection_name = collection_name
-            active_pdf_name = safe_name
+
+            active_collection = (
+                collection
+            )
+
+            active_chroma_path = (
+                db_path
+            )
+
+            active_collection_name = (
+                collection_name
+            )
+
+            active_pdf_name = (
+                safe_name
+            )
 
         return {
             "success": True,
@@ -851,8 +1175,12 @@ async def upload_pdf(file: UploadFile = File(...)):
         }
 
     except Exception as exc:
+
         if pdf_path.exists():
-            pdf_path.unlink(missing_ok=True)
+
+            pdf_path.unlink(
+                missing_ok=True
+            )
 
         raise HTTPException(
             status_code=500,
@@ -860,34 +1188,71 @@ async def upload_pdf(file: UploadFile = File(...)):
         )
 
 
+# ============================================================
+# Chat
+# ============================================================
+
 @app.post("/api/chat")
-def chat(request: ChatRequest):
-    question = request.question.strip()
+def chat(
+    request: ChatRequest
+):
+
+    question = (
+        request.question.strip()
+    )
 
     if not question:
+
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty.",
         )
 
-    mode = request.mode.lower()
-    provider = request.provider.lower()
+    mode = (
+        request.mode.lower()
+    )
 
-    if mode not in {"rag", "chat"}:
+    provider = (
+        request.provider.lower()
+    )
+
+    if mode not in {
+        "rag",
+        "chat",
+    }:
+
         raise HTTPException(
             status_code=400,
-            detail="mode must be 'rag' or 'chat'.",
+            detail=(
+                "mode must be 'rag' or 'chat'."
+            ),
         )
 
-    if provider not in {"local", "google"}:
+    if provider not in {
+        "local",
+        "google",
+    }:
+
         raise HTTPException(
             status_code=400,
-            detail="provider must be 'local' or 'google'.",
+            detail=(
+                "provider must be "
+                "'local' or 'google'."
+            ),
         )
 
-    total_start = time.perf_counter()
+    total_start = (
+        time.perf_counter()
+    )
+
+    # IMPORTANT:
+    #
+    # retrieval stays None in normal Chat mode.
+    # Therefore source generation MUST only happen
+    # when mode == "rag".
 
     retrieval = None
+
     context = ""
 
     # --------------------------------------------------------
@@ -895,22 +1260,50 @@ def chat(request: ChatRequest):
     # --------------------------------------------------------
 
     if mode == "rag":
+
         if active_collection is None:
+
             raise HTTPException(
                 status_code=400,
-                detail="Upload a PDF or load a RAG database first.",
+                detail=(
+                    "Upload a PDF or load a "
+                    "RAG database first."
+                ),
             )
 
-        k = max(1, min(request.top_k, 20))
-
-        retrieval = retrieve_documents(
-            question,
-            k=k,
+        k = max(
+            1,
+            min(
+                request.top_k,
+                20,
+            ),
         )
 
+        try:
+
+            retrieval = (
+                retrieve_documents(
+                    question,
+                    k=k,
+                )
+            )
+
+        except RuntimeError as exc:
+
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            )
+
         context = build_context(
-            retrieval["documents"],
-            retrieval["metadatas"],
+            retrieval.get(
+                "documents",
+                [],
+            ),
+            retrieval.get(
+                "metadatas",
+                [],
+            ),
         )
 
     # --------------------------------------------------------
@@ -918,72 +1311,141 @@ def chat(request: ChatRequest):
     # --------------------------------------------------------
 
     if provider == "local":
-        answer, generation = generate_local(
-            question=question,
-            system_prompt=(
-                RAG_SYSTEM_PROMPT
-                if mode == "rag"
-                else CHAT_SYSTEM_PROMPT
-            ),
-            context=context,
-        )
-    else:
-        answer, generation = generate_google(
-            question=question,
-            system_prompt=(
-                RAG_SYSTEM_PROMPT
-                if mode == "rag"
-                else CHAT_SYSTEM_PROMPT
-            ),
-            context=context,
-            api_key=request.api_key,
+
+        answer, generation = (
+            generate_local(
+                question=question,
+                system_prompt=(
+                    RAG_SYSTEM_PROMPT
+                    if mode == "rag"
+                    else CHAT_SYSTEM_PROMPT
+                ),
+                context=context,
+            )
         )
 
+    else:
+
+        answer, generation = (
+            generate_google(
+                question=question,
+                system_prompt=(
+                    RAG_SYSTEM_PROMPT
+                    if mode == "rag"
+                    else CHAT_SYSTEM_PROMPT
+                ),
+                context=context,
+                api_key=request.api_key,
+            )
+        )
+
+    # --------------------------------------------------------
+    # Total latency
+    # --------------------------------------------------------
+
     total_ms = (
-        time.perf_counter() - total_start
+        time.perf_counter()
+        - total_start
     ) * 1000
+
+    # --------------------------------------------------------
+    # Sources
+    #
+    # IMPORTANT:
+    # Only RAG mode has retrieval sources.
+    # Normal Chat returns [].
+    # --------------------------------------------------------
 
     sources = []
 
-    for i, (metadata, distance,) in enumerate(zip(retrieval["metadatas"], retrieval["distances"],), start=1,):
+    if mode == "rag" and retrieval:
 
-        if metadata is None:
-            metadata = {}
-
-        sources.append(
-            {
-                "rank": i,
-                "page": metadata.get(
-                    "page",
-                    "Unknown",
-                ),
-                "source": metadata.get(
-                    "source",
-                    "Unknown",
-                ),
-                "chunk_id": metadata.get(
-                    "chunk_id",
-                    "Unknown",
-                ),
-                "distance": round(
-                    float(distance),
-                    4,
-                ),
-            }
+        metadatas = retrieval.get(
+            "metadatas",
+            [],
         )
+
+        distances = retrieval.get(
+            "distances",
+            [],
+        )
+
+        for i, metadata in enumerate(
+            metadatas,
+            start=1,
+        ):
+
+            if metadata is None:
+                metadata = {}
+
+            # Distance might be missing.
+            distance = (
+                distances[i - 1]
+                if i - 1 < len(distances)
+                else None
+            )
+
+            if distance is not None:
+
+                try:
+                    distance = round(
+                        float(distance),
+                        4,
+                    )
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    distance = None
+
+            sources.append(
+                {
+                    "rank": i,
+
+                    "page": metadata.get(
+                        "page",
+                        "Unknown",
+                    ),
+
+                    "source": metadata.get(
+                        "source",
+                        "Unknown",
+                    ),
+
+                    "chunk_id": metadata.get(
+                        "chunk_id",
+                        "Unknown",
+                    ),
+
+                    "distance": distance,
+                }
+            )
+
+    # --------------------------------------------------------
+    # Response
+    # --------------------------------------------------------
 
     return {
         "answer": answer,
+
         "mode": mode,
+
         "provider": provider,
+
         "sources": sources,
+
         "timing": {
             "retrieval": (
-                retrieval["timing"]
+                retrieval.get(
+                    "timing"
+                )
                 if retrieval
                 else None
             ),
+
             "generation": generation,
+
             "total_ms": round(
                 total_ms,
                 2,
@@ -992,9 +1454,18 @@ def chat(request: ChatRequest):
     }
 
 
+# ============================================================
+# Startup
+# ============================================================
+
 @app.on_event("startup")
 def startup():
-    # Load the embedding model and existing RAG DB.
-    # Qwen is lazy-loaded when Local is actually selected.
+
+    # Load embedding model and existing RAG DB.
+    #
+    # Qwen is intentionally lazy-loaded only when
+    # Local generation is actually requested.
+
     load_embedding_only()
+
     load_existing_collection()
